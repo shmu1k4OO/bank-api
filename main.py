@@ -35,5 +35,6 @@ class Bank:
         
 
 repository = Bank()
+repository_1 = Bank()
 print(repository.checker("0000025", "0", bic="049805746", val="810", type_of_number="40602"))
 
