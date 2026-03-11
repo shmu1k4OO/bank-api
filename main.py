@@ -72,39 +72,39 @@ class Bank:
          
          mask = [7, 1, 3] * 8
 
-         
+         serial = f"{next(self._account_seq):07d}"
+
+         bic_tail = self.bic[-3:]
+
+         for control_digit in range(10):
+            candidate_account_number  = ACCOUNT_TYPE_CODE + ACCOUNT_CURRENCY + str(control_digit) + ACCOUNT_BRANCH + serial
+            control_sum = 0
+
+            for i in range(len(mask) - 1): # 23 элемента
+                product = int((bic_tail + candidate_account_number)[i]) * mask[i]
+                control_sum += product % 10
+            
+            if control_sum % 10 == 0:
+                return candidate_account_number
 
 
-    def checker(self, serial_number, key, flag="CREDIT_ORG", bic="044525225", val="810", type_of_number="40817"):
-        mask = "71371371371371371371371"
+    def _generate_pan(self, pay_system):
 
-        if flag == "RKC":
-            condition_number = "0" + bic[4:6]
-        elif flag == "CREDIT_ORG":
-            condition_number = bic[6:]
+        bin_number = BIN_BY_SYSTEM.get(pay_system.upper(), BIN_BY_SYSTEM[DEFAULT_PAYMENT_SYSTEM])
+        serial = f"{next(self._pan_seq):09d}"
+        product = bin_number + serial
 
-        user_number = type_of_number + val + str(key) + "0000" + serial_number
+        return  product + str(self._luhn(product))
 
-        number = condition_number + user_number
 
-        sum = 0
+    def _luhn(self, digits15):
 
-        for i in range(len(mask)):
-
-            product = int(number[i]) * int(mask[i])
-
-            sum += product % 10
+        digits = [int(d) for d in digits15[::-1]]
+        for i in range(1, len(digits), 2):
+            double_value_of_digit = digits[i] * 2
+            if double_value_of_digit > 9:
+                digits[i] = double_value_of_digit - 9
+            else:
+                digits[i] = double_value_of_digit
         
-        sum = sum % 10 * 3
-
-        control_key = sum % 10
-
-        if control_key == 0:
-            return 1
-
-        elif self.checker(serial_number, control_key, flag, bic, val, type_of_number) == 1:
-                return control_key
-        else:
-             raise("Ошибка подбора ключа!")
-    
-
+        return (10 - sum(digits) % 10) % 10
