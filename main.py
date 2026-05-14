@@ -22,15 +22,24 @@ DEFAULT_CARD_INFO_FIELDS = [
     "cashback_balance",
     "user_cards",
 ]
+
+TRANSACTION_HISTORY_HEADER = [
+    "timestamp,type,from_card,to_card,amount,mcc,cashback,description"
+]
+DEPOSIT_DESCRIPTION = "{amount:.2f}₽ → карта #{card_id}"
+TRANSFER_DESCRIPTION = "{amount:.2f}₽: карта #{from_card} → карта #{to_card}"
+PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id}"
+BALANCE_DECRIPTION = "Баланс: {balance:.2f}₽"
+
 DEFAULT_ACCOUNT_BALANCE = 0.00
 DEFAULT_CASHBACK_BALANCE = 0.00
+DEFAULT_CASHBACK_TRANSACTION = 0.00
 CARD_CURRENCY = "RUB"
 DEFAULT_PAYMENT_SYSTEM = "MIR"
 
 ACCOUNT_TYPE_CODE = "40817"  # тип счета для физлиц
 ACCOUNT_BRANCH = "0000"  # отсутствие филиалов у банка
 ACCOUNT_CURRENCY = "810"  # идентификатор для рублёвых операций
-
 
 EMPTY_PAN = "0000000000000000"
 
@@ -46,6 +55,25 @@ ISSUE_DATE_START = _dt.date(2022, 1, 1)
 ISSUE_DATE_GENERATOR = (ISSUE_DATE_START + _dt.timedelta(days=i) for i in _it.count())
 EXPIRY_YEARS = 4
 
+TIMESTAMP_START = _dt.datetime(2022, 1, 1, 9, 0, 0)
+
+def timestamp_generator():
+    for i in _it.count():
+        base_date = TIMESTAMP_START + _dt.timedelta(days=i)
+        hour = 9 + (i * 3) % 10        # цикличное смещение часа
+        minute = (i * 7) % 60          # цикличное смещение минут
+        second = (i * 11) % 60         # цикличное смещение секунд
+        yield base_date.replace(hour=hour % 24, minute=minute, second=second)
+
+TIMESTAMP_GENERATOR = timestamp_generator()
+
+def next_timestamp_after(issue_date: _dt.date) -> _dt.datetime:
+    
+    while True:
+        ts = next(TIMESTAMP_GENERATOR)
+        if ts.date() > issue_date:
+            return ts
+
 
 # =============================== ENUM'Ы ===============================
 class CardStatus(Enum):
@@ -53,8 +81,13 @@ class CardStatus(Enum):
     CLOSED = "Closed"
     BLOCKED = "Blocked"
 
-
 CARD_STATUS = CardStatus.ACTIVE
+
+class TransactionType(Enum):
+    DEPOSIT = "deposit"
+    TRANSFER = "transfer"
+    PAY = "pay"
+    INTEREST = "interest"
 
 
 @dataclass
@@ -68,6 +101,9 @@ class User:
     accounts: list = field(default_factory=list)
     cards: list = field(default_factory=list)
 
+    def change_pin(self, old_pin, new_pin):
+        if self.pin == old_pin:
+            self.pin = new_pin 
 
 @dataclass
 class Account:
@@ -80,6 +116,7 @@ class Card:
     def __init__(
             self,
             account,
+            bank,
             card_id,
             payment_system,
             pan,
@@ -92,6 +129,7 @@ class Card:
 
     ):  
         self.account = account
+        self.bank = bank
         self.card_id = card_id
         self.payment_system = payment_system
         self.pan = pan
@@ -145,7 +183,68 @@ class Card:
             f"Card(card_id={self.card_id}, pan={self.pan}, account={self.account}, "
             f"status={self.status}, issue_date={self.issue_date}, expiry_date={self.expiry_date})"
         )
+    
+    def get_balance(self):
+        return f"Баланс: {self.account.balance:.2f}₽"
 
+    def close(self):
+        self.status = CardStatus.CLOSED
+
+    def deposit(self, amount):
+        self.account.balance += amount
+        timestamp=next_timestamp_after(self.issue_date)
+        description = DEPOSIT_DESCRIPTION.format(amount=amount, card_id=self.card_id)
+        transaction = Transaction(None, self.card_id, amount, TransactionType.DEPOSIT.value, None, description, timestamp)
+        self.bank.transaction_log.append(transaction)
+
+    def transfer(self, to_card, amount):
+        latest_issue = max(self.issue_date, to_card.issue_date)
+        timestamp=next_timestamp_after(latest_issue)
+
+        if self.account.balance >= amount:
+            if to_card.pan in self.bank.cards:
+                self.account.balance -= amount
+                to_card.account.balance += amount
+                description = TRANSFER_DESCRIPTION.format(amount=amount, from_card=self.card_id, to_card = to_card.card_id)
+                transaction = Transaction(self.card_id, to_card.card_id, amount, TransactionType.TRANSFER.value, None, description, timestamp)
+                self.bank.transaction_log.append(transaction)
+
+    def pay(self, amount, mcc):
+        if self.account.balance >= amount:
+            self.account.balance -= amount
+            timestamp=next_timestamp_after(self.issue_date)
+            description = PAY_DESCRIPTION.format(amount=amount, mcc=mcc, card_id=self.card_id)
+            transaction = Transaction(self.card_id, None, amount, TransactionType.PAY.value, mcc, description, timestamp)
+            self.bank.transaction_log.append(transaction)
+    
+    def get_transaction_history(self):
+        card_transaction_history = [TRANSACTION_HISTORY_HEADER[0]]
+        for transaction in self.bank.transaction_log:
+            if self.card_id == transaction.from_card or self.card_id == transaction.to_card:
+                if transaction.type == TransactionType.DEPOSIT.value:
+                    amount = "+" + str(transaction.amount)
+                elif transaction.type == TransactionType.PAY.value:
+                    amount = "-" + str(transaction.amount)
+                else:
+                    if self.card_id == transaction.from_card:
+                        amount = "-" + str(transaction.amount)
+                    else:
+                        amount = "+" + str(transaction.amount)
+
+                card_transaction_history.append(f"{transaction.timestamp},{transaction.type},{transaction.from_card or ''},{transaction.to_card or ''},{amount}.00₽,{transaction.mcc or ''},0,00₽,{transaction.description}")
+        return card_transaction_history
+
+   
+
+@dataclass
+class Transaction:
+    from_card: int | None
+    to_card: int | None
+    amount: float
+    type: str
+    mcc: str | None
+    description: str
+    timestamp: _dt.datetime
 
 @dataclass
 class Bank:
@@ -155,6 +254,7 @@ class Bank:
     customers: list = field(default_factory=list)
     accounts: list = field(default_factory=list)
     cards: list = field(default_factory=list)
+    transaction_log: list = field(default_factory=list)
 
     _user_seq: any = field(default_factory=lambda: _it.count(1), init=False)
     _account_seq: any = field(default_factory=lambda: _it.count(1), init=False)
@@ -218,6 +318,7 @@ class Bank:
         acc = Account(None, account, DEFAULT_ACCOUNT_BALANCE)
         
         card = Card(acc,
+                    self, 
                     next(self._card_seq),
                     payment_system, 
                     pan, 
@@ -253,28 +354,72 @@ class Bank:
                     user.cards.append(pan)
                     break
 
-            #  self.accounts.append(account)
-            #  self.cards.append(card)
-
         acc.owner = user
-
         return card
     
 bank = Bank("Demo Bank", "044452345")
-
+# Заводим карты
+cards = []
 card_data = [
-  ("Иванов", "Иван", "1234", "+79161234501", "MIR"),
-  ("Петров", "Пётр", "5678", "+79161234502", "VISA"),
-  ("Сидоров", "Сидор", "0000", "+79161234503", "MASTERCARD"),
-  ("Кузнецов", "Кузьма", "9999", "+79161234504", "VISA"),
-  ("Смирнов", "Сергей", "1111", "+79161234505", "MIR"),
-  ("Смирнов", "Сергей", "1111", "+79161234505", "VISA"),
-  ("Захаров", "Кирилл", "1212", "+79161234507", "MASTERCARD")
+    ("Иванов", "Иван", "1234", "+79161234501", "MIR"),
+    ("Петров", "Пётр", "5678", "+79161234502", "VISA"),
+    ("Сидоров", "Сидор", "0000", "+79161234503", "MASTERCARD"),
+    ("Кузнецов", "Кузьма", "9999", "+79161234504", "VISA"),
+    ("Смирнов", "Сергей", "1111", "+79161234505", "MIR"),
+    ("Смирнов", "Сергей", "1111", "+79161234505", "VISA"),
+    ("Захаров", "Кирилл", "1212", "+79161234507", "MASTERCARD")
 ]
 
-cards = []
-print("Список всех выпущенных карт:\n")
 for last_name, first_name, pin, phone, system in card_data:
-  card = bank.apply_for_card(last_name, first_name, pin, phone, system)
-  print(card.get_card_info())
-  cards.append(card)
+    card = bank.apply_for_card(last_name, first_name, pin, phone, system)
+    cards.append(card)
+
+print("Проверка pin-code")
+user = cards[0].account.owner
+
+print("Старый PIN:", user.pin)
+user.change_pin("1234", "5678")
+print("Новый PIN (после правильной смены):", user.pin)
+
+user.change_pin("0000", "9999")
+print("PIN после попытки с неверным старым:", user.pin)
+
+# Проверяем работу метода get_balance
+print("\nБаланс выпущенных карт")
+for i, card in enumerate(cards):
+    print(card.get_balance())
+
+# Проверяем работу метода deposit
+print("\nПополняем депозиты карт")
+for i, card in enumerate(cards):
+    amount = 100 * (i + 1)
+    card.deposit(amount)
+    print(card.get_balance())
+
+# Проверяем работу метода pay
+print("\nПокупаем продукты в магазине")
+print(cards[0].get_balance())
+cards[0].pay(45, "5814")
+print(cards[0].get_balance())
+
+# Проверяем работу метода transfer
+print("\nПереводим деньги с одной карты на другую")
+print(cards[0].get_balance())
+print(cards[1].get_balance())
+cards[0].transfer(cards[1], 50)
+print(cards[0].get_balance())
+print(cards[1].get_balance())
+for row in cards[1].get_transaction_history():
+    print(row)
+
+# Проверяем работу метода close
+print("\nЗакрываем карту")
+print(cards[0].status.value)
+cards[0].close()
+print(cards[0].status.value)
+
+# Проверяем работу метода get_transaction_history
+print("\nИстория транзакций банковской карты")
+for row in cards[0].get_transaction_history():
+    print(row)
+print(cards[0].get_balance())
