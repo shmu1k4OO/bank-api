@@ -26,11 +26,15 @@ DEFAULT_CARD_INFO_FIELDS = [
 TRANSACTION_HISTORY_HEADER = [
     "timestamp,type,from_card,to_card,amount,mcc,cashback,description"
 ]
+CB_DEBIT_PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id} (кешбэк {cashback_amount:.2f}₽)"
+SAVING_INTEREST_DESCRIPTION = "Начислены проценты {interest:.2f}₽ по накопительной карте #{card_id}"
 DEPOSIT_DESCRIPTION = "{amount:.2f}₽ → карта #{card_id}"
 TRANSFER_DESCRIPTION = "{amount:.2f}₽: карта #{from_card} → карта #{to_card}"
 PAY_DESCRIPTION = "{amount:.2f}₽ (MCC: {mcc}) с карты #{card_id}"
 BALANCE_DECRIPTION = "Баланс: {balance:.2f}₽"
 
+DEBIT_DEFAULT_CASHBACK_RATE = 0.03
+SAVING_CARD_DEFAULT_INTEREST = 0.015
 DEFAULT_ACCOUNT_BALANCE = 0.00
 DEFAULT_CASHBACK_BALANCE = 0.00
 DEFAULT_CASHBACK_TRANSACTION = 0.00
@@ -57,6 +61,7 @@ EXPIRY_YEARS = 4
 
 TIMESTAMP_START = _dt.datetime(2022, 1, 1, 9, 0, 0)
 
+
 def timestamp_generator():
     for i in _it.count():
         base_date = TIMESTAMP_START + _dt.timedelta(days=i)
@@ -65,7 +70,9 @@ def timestamp_generator():
         second = (i * 11) % 60         # цикличное смещение секунд
         yield base_date.replace(hour=hour % 24, minute=minute, second=second)
 
+
 TIMESTAMP_GENERATOR = timestamp_generator()
+
 
 def next_timestamp_after(issue_date: _dt.date) -> _dt.datetime:
     
@@ -81,7 +88,9 @@ class CardStatus(Enum):
     CLOSED = "Closed"
     BLOCKED = "Blocked"
 
+
 CARD_STATUS = CardStatus.ACTIVE
+
 
 class TransactionType(Enum):
     DEPOSIT = "deposit"
@@ -105,11 +114,13 @@ class User:
         if self.pin == old_pin:
             self.pin = new_pin 
 
+
 @dataclass
 class Account:
     owner: "User"
     acc_id: str
     balance: float = DEFAULT_ACCOUNT_BALANCE
+    cashback_balance: float = DEFAULT_CASHBACK_BALANCE
 
 
 class Card:
@@ -125,7 +136,8 @@ class Card:
             status=CARD_STATUS,
             card_currency=CARD_CURRENCY,
             bank_name=None,
-            bank_bic=None
+            bank_bic=None,
+            **kwargs
 
     ):  
         self.account = account
@@ -166,7 +178,7 @@ class Card:
             "issue_date": f"Выпуск:        {self.issue_date}",
             "expiry_date": f"Срок:          {self.expiry_date}",
             "user_cards": f"Карты пользователя: {user.cards}",
-            "cashback_balance": f"Кешбэк:        {DEFAULT_CASHBACK_BALANCE:.2f}₽",
+            "cashback_balance": f"Кешбэк:        {self.account.cashback_balance:.2f}₽",
             "balance": f"Баланс:        {self.account.balance:.2f}₽",
         }
 
@@ -192,59 +204,97 @@ class Card:
 
     def deposit(self, amount):
         self.account.balance += amount
-        timestamp=next_timestamp_after(self.issue_date)
+        timestamp = next_timestamp_after(self.issue_date)
         description = DEPOSIT_DESCRIPTION.format(amount=amount, card_id=self.card_id)
-        transaction = Transaction(None, self.card_id, amount, TransactionType.DEPOSIT.value, None, description, timestamp)
+        transaction = Transaction(
+            None,
+            self.card_id,
+            amount,
+            DEFAULT_CASHBACK_BALANCE, 
+            TransactionType.DEPOSIT.value,
+            None,
+            description,
+            timestamp  
+        )
         self.bank.transaction_log.append(transaction)
 
     def transfer(self, to_card, amount):
         latest_issue = max(self.issue_date, to_card.issue_date)
-        timestamp=next_timestamp_after(latest_issue)
+        timestamp = next_timestamp_after(latest_issue)
 
         if self.account.balance >= amount:
-            if to_card.pan in self.bank.cards:
+            if to_card in self.bank.cards:
                 self.account.balance -= amount
                 to_card.account.balance += amount
-                description = TRANSFER_DESCRIPTION.format(amount=amount, from_card=self.card_id, to_card = to_card.card_id)
-                transaction = Transaction(self.card_id, to_card.card_id, amount, TransactionType.TRANSFER.value, None, description, timestamp)
+                description = TRANSFER_DESCRIPTION.format(
+                    amount=amount,
+                    from_card=self.card_id, 
+                    to_card=to_card.card_id
+                )
+                transaction = Transaction(
+                    self.card_id,
+                    to_card.card_id, 
+                    amount, 
+                    DEFAULT_CASHBACK_BALANCE,
+                    TransactionType.TRANSFER.value, 
+                    None, 
+                    description, 
+                    timestamp      
+                )
                 self.bank.transaction_log.append(transaction)
 
     def pay(self, amount, mcc):
         if self.account.balance >= amount:
             self.account.balance -= amount
-            timestamp=next_timestamp_after(self.issue_date)
+            timestamp = next_timestamp_after(self.issue_date)
             description = PAY_DESCRIPTION.format(amount=amount, mcc=mcc, card_id=self.card_id)
-            transaction = Transaction(self.card_id, None, amount, TransactionType.PAY.value, mcc, description, timestamp)
+            transaction = Transaction(
+                self.card_id, 
+                None, 
+                amount,
+                DEFAULT_CASHBACK_BALANCE, 
+                TransactionType.PAY.value, 
+                mcc, 
+                description, 
+                timestamp
+            )
             self.bank.transaction_log.append(transaction)
     
     def get_transaction_history(self):
         card_transaction_history = [TRANSACTION_HISTORY_HEADER[0]]
-        for transaction in self.bank.transaction_log:
+        sorted_transaction = sorted(self.bank.transaction_log, key=lambda t: t.timestamp)
+        for transaction in sorted_transaction:
             if self.card_id == transaction.from_card or self.card_id == transaction.to_card:
                 if transaction.type == TransactionType.DEPOSIT.value:
-                    amount = "+" + str(transaction.amount)
+                    sign = "+"
                 elif transaction.type == TransactionType.PAY.value:
-                    amount = "-" + str(transaction.amount)
+                    sign = "-"
                 else:
                     if self.card_id == transaction.from_card:
-                        amount = "-" + str(transaction.amount)
+                        sign = "-"
                     else:
-                        amount = "+" + str(transaction.amount)
+                        sign = "+"
 
-                card_transaction_history.append(f"{transaction.timestamp},{transaction.type},{transaction.from_card or ''},{transaction.to_card or ''},{amount}.00₽,{transaction.mcc or ''},0,00₽,{transaction.description}")
+                card_transaction_history.append(
+                    f"{transaction.timestamp},{transaction.type},"
+                    f"{transaction.from_card or ''},{transaction.to_card or ''},"
+                    f"{sign}{transaction.amount:.2f}₽,{transaction.mcc or ''},"
+                    f"{transaction.cashback:.2f}₽,{transaction.description}"
+                )
         return card_transaction_history
 
    
-
 @dataclass
 class Transaction:
     from_card: int | None
     to_card: int | None
     amount: float
+    cashback: float
     type: str
     mcc: str | None
     description: str
     timestamp: _dt.datetime
+
 
 @dataclass
 class Bank:
@@ -317,18 +367,20 @@ class Bank:
 
         acc = Account(None, account, DEFAULT_ACCOUNT_BALANCE)
         
-        card = Card(acc,
-                    self, 
-                    next(self._card_seq),
-                    payment_system, 
-                    pan, 
-                    issue_date=None, 
-                    expiry_date=None, 
-                    status=CARD_STATUS, 
-                    card_currency=CARD_CURRENCY, 
-                    bank_name=self.name,
-                    bank_bic=self.bic    
-                    )
+        card = card_class(
+            acc,
+            self, 
+            next(self._card_seq),
+            payment_system, 
+            pan, 
+            issue_date=None, 
+            expiry_date=None, 
+            status=CARD_STATUS, 
+            card_currency=CARD_CURRENCY, 
+            bank_name=self.name,
+            bank_bic=self.bic,
+            **kwargs    
+        )
 
         if (
             phone not in [user.phone for user in self.customers] 
@@ -341,85 +393,213 @@ class Bank:
                         pin, 
                         next(self._user_seq), 
                         accounts=[account], 
-                        cards=[pan])
+                        cards=[card])
         
             self.customers.append(user)
             self.accounts.append(account)
-            self.cards.append(pan)
+            self.cards.append(card)
 
         else:
             for user in self.customers:
                 if user.phone == phone and user.last_name == last_name and user.first_name == first_name:
                     user.accounts.append(account)
-                    user.cards.append(pan)
+                    user.cards.append(card)
                     break
 
         acc.owner = user
         return card
     
+    def get_global_history(self):
+        bank_transaction_histoty = [TRANSACTION_HISTORY_HEADER[0]]
+        sorted_transaction = sorted(self.transaction_log, key=lambda t: t.timestamp)
+        for transaction in sorted_transaction:
+            bank_transaction_histoty.append(
+                f"{transaction.timestamp},{transaction.type},"
+                f"{transaction.from_card or ''},{transaction.to_card or ''},"
+                f"{transaction.amount:.2f}₽,{transaction.mcc or ''},"
+                f"{transaction.cashback:.2f}₽,{transaction.description}"
+            )
+        return bank_transaction_histoty
+    
+    def issue_simple_debit_card(
+            self, last_name, first_name, pin, phone, payment_system, **kwargs
+    ):
+        
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=SimpleDebitCard,
+            **kwargs
+        )
+    
+    def issue_cashback_debit_card(
+            self, last_name, first_name, pin, phone, payment_system, **kwargs
+    ):
+        
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=CashbackDebitCard,
+            **kwargs
+        )
+    
+    def issue_saving_card(
+            self, last_name, first_name, pin, phone, payment_system, **kwargs
+    ):
+        
+        return self.apply_for_card(
+            last_name,
+            first_name,
+            pin,
+            phone,
+            payment_system,
+            card_class=SavingCard,
+            **kwargs
+        )
+
+
+class SimpleDebitCard(Card):
+    pass
+
+
+class CashbackDebitCard(Card):
+    def __init__(
+            self,
+            account,
+            bank,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            status=CARD_STATUS,
+            card_currency=CARD_CURRENCY,
+            bank_name=None,
+            bank_bic=None,
+            cashback_rate=DEBIT_DEFAULT_CASHBACK_RATE,
+            **kwargs
+
+    ):
+        super().__init__(
+            account,
+            bank,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            status,
+            card_currency,
+            bank_name,
+            bank_bic,
+            **kwargs
+        )
+        self.cashback_rate = cashback_rate
+
+    def pay(self, amount, mcc):
+        if self.account.balance >= amount:
+            self.account.balance -= amount
+            timestamp = next_timestamp_after(self.issue_date)
+            cashback_amount = round((amount * self.cashback_rate), 2)
+            self.account.cashback_balance += cashback_amount
+            description = CB_DEBIT_PAY_DESCRIPTION.format(
+                amount=amount, 
+                mcc=mcc, 
+                card_id=self.card_id, 
+                cashback_amount=cashback_amount
+            )
+            transaction = Transaction(
+                self.card_id,
+                None, 
+                amount,
+                cashback_amount, 
+                TransactionType.PAY.value, 
+                mcc, 
+                description,
+                timestamp
+            )
+            self.bank.transaction_log.append(transaction)
+
+
+class SavingCard(Card):
+    def __init__(
+            self,
+            account,
+            bank,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            status=CARD_STATUS,
+            card_currency=CARD_CURRENCY,
+            bank_name=None,
+            bank_bic=None,
+            interest_rate=SAVING_CARD_DEFAULT_INTEREST,
+            **kwargs
+
+    ):
+        super().__init__(
+            account,
+            bank,
+            card_id,
+            payment_system,
+            pan,
+            issue_date,
+            expiry_date,
+            status,
+            card_currency,
+            bank_name,
+            bank_bic,
+            **kwargs
+        )
+        self.interest_rate = interest_rate
+    
+    def accrue_interest(self):
+        interest = round((self.account.balance * self.interest_rate), 2)
+        self.account.balance += interest
+        description = SAVING_INTEREST_DESCRIPTION.format(interest=interest, card_id=self.card_id)
+        timestamp = next_timestamp_after(self.issue_date)
+        transaction = Transaction(
+            None, 
+            self.card_id, 
+            interest,
+            DEFAULT_CASHBACK_BALANCE, 
+            TransactionType.INTEREST.value, 
+            None, 
+            description, 
+            timestamp
+        )
+        self.bank.transaction_log.append(transaction)
+
 bank = Bank("Demo Bank", "044452345")
-# Заводим карты
-cards = []
-card_data = [
-    ("Иванов", "Иван", "1234", "+79161234501", "MIR"),
-    ("Петров", "Пётр", "5678", "+79161234502", "VISA"),
-    ("Сидоров", "Сидор", "0000", "+79161234503", "MASTERCARD"),
-    ("Кузнецов", "Кузьма", "9999", "+79161234504", "VISA"),
-    ("Смирнов", "Сергей", "1111", "+79161234505", "MIR"),
-    ("Смирнов", "Сергей", "1111", "+79161234505", "VISA"),
-    ("Захаров", "Кирилл", "1212", "+79161234507", "MASTERCARD")
-]
+c_base = bank.issue_saving_card("Кузнецов", "Кирилл", "3333", "+70000000004", "MIR")
+c_custom = bank.issue_saving_card("Кузнецов", "Кирилл", "3333", "+70000000005", "MIR", interest_rate=0.03)
+c_recv = bank.issue_saving_card("Сидоров", "Сергей", "4444", "+70000000006", "MIR")
 
-for last_name, first_name, pin, phone, system in card_data:
-    card = bank.apply_for_card(last_name, first_name, pin, phone, system)
-    cards.append(card)
+c_base.deposit(1000)
+c_custom.deposit(1000)
+c_recv.deposit(500)
 
-print("Проверка pin-code")
-user = cards[0].account.owner
+c_base.pay(200, '5411')
+c_custom.pay(200, '5814')
 
-print("Старый PIN:", user.pin)
-user.change_pin("1234", "5678")
-print("Новый PIN (после правильной смены):", user.pin)
+c_base.accrue_interest()
+c_custom.accrue_interest()
 
-user.change_pin("0000", "9999")
-print("PIN после попытки с неверным старым:", user.pin)
+c_base.transfer(c_recv, 150)
+c_custom.transfer(c_recv, 120)
 
-# Проверяем работу метода get_balance
-print("\nБаланс выпущенных карт")
-for i, card in enumerate(cards):
-    print(card.get_balance())
+print(c_base.get_balance())
+print(c_custom.get_balance())
+print(c_recv.get_balance())
 
-# Проверяем работу метода deposit
-print("\nПополняем депозиты карт")
-for i, card in enumerate(cards):
-    amount = 100 * (i + 1)
-    card.deposit(amount)
-    print(card.get_balance())
-
-# Проверяем работу метода pay
-print("\nПокупаем продукты в магазине")
-print(cards[0].get_balance())
-cards[0].pay(45, "5814")
-print(cards[0].get_balance())
-
-# Проверяем работу метода transfer
-print("\nПереводим деньги с одной карты на другую")
-print(cards[0].get_balance())
-print(cards[1].get_balance())
-cards[0].transfer(cards[1], 50)
-print(cards[0].get_balance())
-print(cards[1].get_balance())
-for row in cards[1].get_transaction_history():
-    print(row)
-
-# Проверяем работу метода close
-print("\nЗакрываем карту")
-print(cards[0].status.value)
-cards[0].close()
-print(cards[0].status.value)
-
-# Проверяем работу метода get_transaction_history
-print("\nИстория транзакций банковской карты")
-for row in cards[0].get_transaction_history():
-    print(row)
-print(cards[0].get_balance())
+for row in c_base.get_transaction_history(): print(row)
+for row in c_custom.get_transaction_history(): print(row)
+for row in c_recv.get_transaction_history(): print(row)
