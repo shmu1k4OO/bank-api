@@ -778,26 +778,3 @@ class SavingCard(Card):
     
     def pay(self, amount, mcc):
         raise BusinessRuleError(BusinessRuleError.PAYMENT_NOT_ALLOWED_FOR_SAVING)
-    
-bank = Bank("Тестовый Банк", "123456789")
-user = User("Иванов", "Иван", "89001234567", "1234", 1)
-user_2 = User("Петров", "Пётр", "89007654321", "4321", 2)
-card = bank.apply_for_card(
-    last_name=user.last_name,
-    first_name=user.first_name,
-    phone=user.phone,
-    pin=user.pin
-)
-
-card_1 = bank.apply_for_card(
-    last_name=user_2.last_name,
-    first_name=user_2.first_name,
-    phone=user_2.phone,
-    pin=user_2.pin
-)
-
-card.deposit(100000)
-card.transfer(None, 1000)
-
-print(card_1.get_transaction_history())
-print(card_1.get_card_info())
