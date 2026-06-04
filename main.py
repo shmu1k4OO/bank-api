@@ -48,7 +48,7 @@ DEFAULT_CASHBACK_BALANCE = 0.00
 DEFAULT_CASHBACK_TRANSACTION = 0.00
 CARD_CURRENCY = "RUB"
 DEFAULT_PAYMENT_SYSTEM = "MIR"
-FORBIDDEN_MCC = {"7995", "7996", "7997", "7998", "7999"}  # код категории продавца для азартных игр и лотерей
+FORBIDDEN_MCC = {"7995", "7996", "7997", "7998", "7999", "4829"}  # код категории продавца для азартных игр и лотерей
 
 ACCOUNT_TYPE_CODE = "40817"  # тип счета для физлиц
 ACCOUNT_BRANCH = "0000"  # отсутствие филиалов у банка
@@ -153,6 +153,15 @@ class InsufficientFundsError(BankError):
     INSUFFICIENT_FUNDS_FOR_TRANSFER = "Недостаточно денег для осуществления перевода."
 
 
+def handle_errors(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except (ValidationError, AccessError, NotFoundError, BusinessRuleError, InsufficientFundsError) as e:
+            print(e)
+    return wrapper
+
+
 # =============================== ENUM'Ы ===============================
 class CardStatus(Enum):
     ACTIVE = "Active"
@@ -181,6 +190,7 @@ class User:
     accounts: list = field(default_factory=list)
     cards: list = field(default_factory=list)
 
+    @handle_errors
     def change_pin(self, old_pin, new_pin):
         if (
             not (isinstance(new_pin, str) and len(str(new_pin)) == 4)
@@ -195,7 +205,7 @@ class User:
         elif self.pin != old_pin:
             raise ValidationError(ValidationError.PIN_MISMATCH)
         else:
-            self.pin = new_pin 
+            self.pin = new_pin
 
 
 @dataclass
@@ -244,7 +254,8 @@ class Card:
                 self.issue_date.day,
             )
 
-    def get_card_info(self, fields: list = None):
+    @handle_errors
+    def get_card_info(self, fields: list = None):    
         if self.account is None or self.account.owner is None:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
         if self.status == CardStatus.CLOSED or self.status == CardStatus.BLOCKED:
@@ -275,13 +286,14 @@ class Card:
             + "\n"
             + "-" * 50
         )
-
+        
     def __repr__(self):
         return (
             f"Card(card_id={self.card_id}, pan={self.pan}, account={self.account}, "
             f"status={self.status}, issue_date={self.issue_date}, expiry_date={self.expiry_date})"
         )
     
+    @handle_errors
     def get_balance(self):
         if self.account is None:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
@@ -289,11 +301,12 @@ class Card:
             raise AccessError(AccessError.CARD_CLOSED)
         else:
             return f"Баланс: {self.account.balance:.2f}₽"
-
+        
     def close(self):
         self.status = CardStatus.CLOSED
 
-    def deposit(self, amount):
+    @handle_errors
+    def deposit(self, amount):    
         if amount <= 0:
             raise ValidationError(ValidationError.DEPOSIT_AMOUNT_NEGATIVE)
         if self.account is None:
@@ -318,8 +331,9 @@ class Card:
             timestamp  
         )
         self.bank.transaction_log.append(transaction)
-            
-    def transfer(self, to_card, amount):
+        
+    @handle_errors    
+    def transfer(self, to_card, amount):     
         if amount <= 0:
             raise ValidationError(ValidationError.AMOUNT_NEGATIVE)
         if to_card is None:
@@ -360,7 +374,8 @@ class Card:
         )
         self.bank.transaction_log.append(transaction)
             
-    def pay(self, amount, mcc):
+    @handle_errors        
+    def pay(self, amount, mcc):     
         if amount <= 0:
             raise ValidationError(ValidationError.PAY_AMOUNT_NEGATIVE)
         elif not re.fullmatch(r"\d{4}", mcc):
@@ -391,7 +406,8 @@ class Card:
                 timestamp
             )
             self.bank.transaction_log.append(transaction)
-            
+    
+    @handle_errors
     def get_transaction_history(self):
         if self.account is None or self.account.owner is None:
             raise AccessError(AccessError.ACCOUNT_NOT_LINKED)
@@ -420,7 +436,7 @@ class Card:
                     f"{transaction.cashback:.2f}₽,{transaction.description}"
                 )
         return card_transaction_history
-
+        
    
 @dataclass
 class Transaction:
@@ -489,6 +505,7 @@ class Bank:
         
         return (10 - sum(digits) % 10) % 10
     
+    @handle_errors
     def apply_for_card(
             self,
             last_name,
@@ -669,6 +686,7 @@ class CashbackDebitCard(Card):
         )
         self.cashback_rate = cashback_rate
 
+    @handle_errors
     def pay(self, amount, mcc):
         if amount <= 0:
             raise ValidationError(ValidationError.PAY_AMOUNT_NEGATIVE)
@@ -749,7 +767,8 @@ class SavingCard(Card):
         )
         self.interest_rate = interest_rate
     
-    def accrue_interest(self):
+    @handle_errors
+    def accrue_interest(self): 
         if self.interest_rate < 0:
             raise ValidationError(ValidationError.INTEREST_NEGATIVE)
         elif self.account is None:
@@ -775,6 +794,7 @@ class SavingCard(Card):
                 timestamp
             )
             self.bank.transaction_log.append(transaction)
-    
+        
+    @handle_errors
     def pay(self, amount, mcc):
         raise BusinessRuleError(BusinessRuleError.PAYMENT_NOT_ALLOWED_FOR_SAVING)
